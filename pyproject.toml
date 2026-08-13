@@ -1,0 +1,47 @@
+[project]
+name = "agent-mcp-py"
+version = "0.1.0"
+description = "The convention layer every app uses to expose itself as an MCP server."
+requires-python = ">=3.11"
+dependencies = [
+    # The official MCP SDK. v2 renamed FastMCP -> MCPServer and moved it to
+    # mcp.server.mcpserver; this package targets that API exclusively and will not
+    # import under 1.x. The upper bound exists because v2 was itself a breaking
+    # rename of the whole server surface — an unbounded edge means a future
+    # `pip install` silently breaks every app in the ecosystem at once.
+    "mcp>=2.0,<3",
+    # mcp v2 needs >=2.12; state it so a resolver can't quietly settle on 2.7.
+    "pydantic>=2.12",
+    "pydantic-settings>=2.3",
+    # NOT httpx. mcp v2 swapped to httpx2, a separate distribution with a separate
+    # top-level module. We import it directly (registry, sync_client, call_peer),
+    # so it is a real dependency here and not merely transitive.
+    "httpx2>=2.5",
+    # Imported directly for Route/JSONResponse in usage_routes() and for the ASGI
+    # gate. Transitive via mcp, but declared because we import it. Note starlette
+    # is on 1.x — the 0.4x series predates the mcp v2 line.
+    "starlette>=1.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    # The end-to-end proof drives a real server over streamable HTTP.
+    "uvicorn>=0.30",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# src/ layout (Amber uses a flat one; this is a distributable library, not an app).
+# `where` is the line whose omission ships an empty wheel that installs happily and
+# then ImportErrors at runtime.
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agent_mcp*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
