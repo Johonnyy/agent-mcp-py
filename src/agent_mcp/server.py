@@ -97,7 +97,8 @@ class AgentMCPServer:
         self.settings = cfg
 
         self.app_name = app_name or cfg.app_name
-        schema_mod.validate_tool_name(self.app_name)
+        # Stricter than a tool name: this is prefixed onto every tool we expose.
+        schema_mod.validate_app_name(self.app_name)
         self.version = version or cfg.version
         self.public_url = (
             public_url if public_url is not None else cfg.public_url

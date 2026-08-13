@@ -1,12 +1,19 @@
 """Tests for tool-name rules and JSON-Schema flattening. No fakes needed."""
 
+import re
+
 import pytest
 
 from agent_mcp.schema import (
+    MAX_APP_NAME_LEN,
+    MAX_TOOL_NAME_LEN,
+    MAX_WIRE_NAME_LEN,
     SchemaTooComplex,
     assert_wire_safe,
     flatten_schema,
     has_refs,
+    namespaced_name,
+    validate_app_name,
     validate_tool_name,
 )
 
@@ -32,6 +39,29 @@ def test_good_tool_names_are_accepted(name):
 def test_bad_tool_names_are_rejected_with_a_useful_message(name, reason):
     with pytest.raises(ValueError, match=reason):
         validate_tool_name(name)
+
+
+def test_an_app_name_is_capped_shorter_than_a_tool_name():
+    """It is prefixed onto every tool, so two individually legal names must not be
+    able to combine into an illegal one."""
+    assert MAX_APP_NAME_LEN + 2 + MAX_TOOL_NAME_LEN == MAX_WIRE_NAME_LEN
+    validate_app_name("a" * MAX_APP_NAME_LEN)
+    with pytest.raises(ValueError, match=str(MAX_APP_NAME_LEN)):
+        validate_app_name("a" * (MAX_APP_NAME_LEN + 1))
+
+
+def test_the_worst_case_namespaced_name_fits_the_provider_limit():
+    worst = namespaced_name("a" * MAX_APP_NAME_LEN, "b" * MAX_TOOL_NAME_LEN)
+    assert len(worst) == MAX_WIRE_NAME_LEN
+    # The pattern agent_runtime validates against before sending to the provider.
+    assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", worst)
+
+
+def test_an_app_name_obeys_the_tool_character_rules_too():
+    with pytest.raises(ValueError, match="snake_case"):
+        validate_app_name("Finance App")
+    with pytest.raises(ValueError, match="empty"):
+        validate_app_name("")
 
 
 def test_a_single_ref_is_inlined():

@@ -80,6 +80,43 @@ def test_next_hop_refuses_to_build_headers_for_an_over_cap_call():
         next_hop_headers(CallDepth(conversation_id="c", depth=MAX_AGENT_DEPTH))
 
 
+def test_the_sender_and_the_receiver_agree_at_every_depth():
+    """The off-by-one that matters: next_hop_headers must check the depth it is
+    about to SEND, not the one it received. Checking the received depth builds a
+    request one hop past the cap that the receiver then refuses — a wasted round
+    trip surfacing as someone else's error."""
+    for depth in range(0, MAX_AGENT_DEPTH + 2):
+        scope = CallDepth(conversation_id="c", depth=depth)
+        try:
+            headers = next_hop_headers(scope)
+        except DepthExceeded:
+            sender_allows = False
+            outgoing = depth + 1
+        else:
+            sender_allows = True
+            outgoing = int(headers[HEADER_AGENT_DEPTH])
+
+        try:
+            check_depth(outgoing)
+        except DepthExceeded:
+            receiver_accepts = False
+        else:
+            receiver_accepts = True
+
+        assert sender_allows == receiver_accepts, (
+            f"at depth {depth} the sender would emit {outgoing}: "
+            f"sender allows={sender_allows}, receiver accepts={receiver_accepts}"
+        )
+
+
+def test_the_last_usable_hop_is_one_below_the_cap():
+    assert int(next_hop_headers(CallDepth("c", MAX_AGENT_DEPTH - 2))[
+        HEADER_AGENT_DEPTH
+    ]) == MAX_AGENT_DEPTH - 1
+    with pytest.raises(DepthExceeded):
+        next_hop_headers(CallDepth("c", MAX_AGENT_DEPTH - 1))
+
+
 def test_confirmation_does_not_propagate_downstream_unless_asked_for():
     scope = CallDepth(conversation_id="c", depth=0, confirmed=True)
     assert HEADER_CONFIRMED not in next_hop_headers(scope)

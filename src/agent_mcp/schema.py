@@ -42,7 +42,15 @@ from typing import Any
 #: ``agent_runtime`` adds when it merges tools from several servers.
 TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 
+#: The provider ceiling for a function name in an OpenAI-compatible ``tools=[...]``
+#: entry. Everything below is budgeted against it.
+MAX_WIRE_NAME_LEN = 64
 MAX_TOOL_NAME_LEN = 40
+#: 64 - len("__") - 40. An app name is itself half of every namespaced tool name
+#: ``<app>__<tool>``, so it needs a tighter cap than a tool name — otherwise two
+#: individually legal names combine into an illegal one, and the failure lands in
+#: whichever agent aggregated them rather than in the app that chose the name.
+MAX_APP_NAME_LEN = MAX_WIRE_NAME_LEN - 2 - MAX_TOOL_NAME_LEN
 
 _ROOT_COMPOSITION = ("oneOf", "anyOf", "allOf", "not")
 
@@ -78,6 +86,30 @@ def validate_tool_name(name: str) -> None:
             f"tool name {name!r} must be snake_case: lowercase letters, digits and "
             "underscores, starting with a letter"
         )
+
+
+def validate_app_name(name: str) -> None:
+    """Raise ``ValueError`` unless ``name`` is safe as a tool-name namespace.
+
+    Same character rules as a tool, but shorter: the app name is prefixed onto every
+    one of its tools as ``<app>__<tool>`` when an agent aggregates several servers,
+    so it has to fit in the budget left by the longest legal tool name.
+    """
+    if not name:
+        raise ValueError("app name must not be empty")
+    if len(name) > MAX_APP_NAME_LEN:
+        raise ValueError(
+            f"app name {name!r} is {len(name)} characters; the limit is "
+            f"{MAX_APP_NAME_LEN} so that '<app>__<tool>' stays inside the "
+            f"{MAX_WIRE_NAME_LEN}-character provider limit even for a "
+            f"{MAX_TOOL_NAME_LEN}-character tool name"
+        )
+    validate_tool_name(name)
+
+
+def namespaced_name(app_name: str, tool_name: str) -> str:
+    """How an aggregating agent will address one of our tools."""
+    return f"{app_name}__{tool_name}"
 
 
 def _resolve_pointer(root: dict[str, Any], ref: str) -> dict[str, Any]:

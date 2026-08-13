@@ -43,6 +43,13 @@ HEADER_CONFIRMED = "X-Confirmed"
 
 #: Hops allowed before a call is refused. The single source of truth — config reads
 #: it from here rather than repeating the literal, and so does ``agent_runtime``.
+#:
+#: Read it as "valid depths are ``0 .. MAX_AGENT_DEPTH - 1``". A human clicking a
+#: button is depth 0; a call arriving *at* the cap has no hops left and is refused.
+#: Both sides of a hop apply the same rule to the same number — the sender checks
+#: the depth it is about to send, the receiver checks the depth it received — which
+#: is what stops a sender from cheerfully building a request the receiver will
+#: reject.
 MAX_AGENT_DEPTH = 5
 
 #: Header values accepted as "yes" for ``X-Confirmed``. Deliberately short: a typo
@@ -141,17 +148,19 @@ def next_hop_headers(
 ) -> dict[str, str]:
     """Headers for a call this server makes *out* to a peer.
 
-    This is the function ``agent_runtime`` calls, and it **re-checks the cap before
-    building anything** — a caller that forgets to pre-check still cannot emit an
-    over-limit request, because there are no headers to send it with. Belt and
-    braces on purpose: the failure being prevented is expensive and silent.
+    This is the function ``agent_runtime`` calls, and it **checks the depth it is
+    about to send** — not the one it received. That distinction is the whole point:
+    checking the current depth would happily build a request one hop past the cap,
+    which the receiver then refuses, so the refusal would cost a round trip and
+    surface as someone else's error. Checking the outgoing value means the sender
+    and the receiver apply the same rule to the same number, and an over-limit hop
+    never leaves the process.
     """
-    check_depth(
-        current.depth, limit=limit, conversation_id=current.conversation_id
-    )
+    outgoing = current.depth + 1
+    check_depth(outgoing, limit=limit, conversation_id=current.conversation_id)
     headers = {
         HEADER_CONVERSATION_ID: current.conversation_id,
-        HEADER_AGENT_DEPTH: str(current.depth + 1),
+        HEADER_AGENT_DEPTH: str(outgoing),
     }
     if confirmed:
         headers[HEADER_CONFIRMED] = "true"

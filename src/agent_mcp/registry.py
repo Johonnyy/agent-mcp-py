@@ -51,6 +51,23 @@ class PeerRecord:
     version: str = ""
     tools: tuple[str, ...] = field(default=())
 
+    def as_dict(self) -> dict[str, object]:
+        """This record as a plain dict, including the ready-to-use ``mcp_url``.
+
+        Consumers outside this package (``agent_runtime``) want a mapping, and
+        would otherwise reach for ``dataclasses.asdict`` and then have to remember
+        to append the mount path themselves. Handing over the resolved URL removes
+        the one step everybody would get wrong.
+        """
+        return {
+            "name": self.name,
+            "base_url": self.base_url,
+            "mcp_url": mcp_url(self),
+            "token": self.token,
+            "version": self.version,
+            "tools": list(self.tools),
+        }
+
 
 def mcp_url(record: PeerRecord) -> str:
     """The streamable-HTTP endpoint for a peer.

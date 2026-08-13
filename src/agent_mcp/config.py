@@ -119,14 +119,22 @@ class AgentMCPSettings(BaseSettings):
 
 @lru_cache
 def get_settings() -> AgentMCPSettings:
-    """Process-wide settings singleton.
+    """Process-wide settings singleton, read from the environment.
 
     Cached so ``.env`` is parsed once. Tests clear it with
     ``get_settings.cache_clear()`` after mutating the environment.
+
+    This is a **fallback, not a requirement**. Every value here can be passed
+    straight to :class:`~agent_mcp.server.AgentMCPServer`, and a host app that
+    already has its own settings object should do exactly that — see
+    ``AgentMCPSettings(_env_file=None, ...)``. Reading the environment is a
+    convenience for a standalone service, not this library's way of configuring
+    itself.
+
+    Deliberately *not* accompanied by a module-level ``settings = get_settings()``
+    handle, which is Amber's convention: Amber is an application and owns its
+    process, whereas this is a library imported into somebody else's. A
+    module-level call would parse a ``.env`` belonging to the host app as an
+    import side effect, before that app had any chance to configure us.
     """
     return AgentMCPSettings()
-
-
-# Convenience handle for call sites that don't need lazy loading. Runtime code
-# should still call get_settings() inside functions so tests can clear the cache.
-settings = get_settings()
