@@ -1,7 +1,7 @@
 """Registration with the hosted sync store — the discovery half of the ecosystem.
 
 On startup a server pushes a descriptor of itself — name, URL, tools, resources — so
-Lucidity and every other agent can find it without anyone hand-editing a config
+Aperture and every other agent can find it without anyone hand-editing a config
 file. A heartbeat re-registers periodically so the store can age out servers that
 have gone away.
 
