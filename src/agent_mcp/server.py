@@ -35,11 +35,13 @@ import logging
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, TypeVar
+from urllib.parse import urlparse
 
 import httpx2  # not httpx: mcp v2 ships httpx2, a separate distribution
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -374,7 +376,10 @@ class AgentMCPServer:
                 self.app_name,
             )
 
-        inner = self._mcp.streamable_http_app(streamable_http_path=path)
+        inner = self._mcp.streamable_http_app(
+            streamable_http_path=path,
+            transport_security=self._transport_security(),
+        )
         self._asgi_app = BearerGate(
             inner,
             keys=self._keys,
@@ -383,6 +388,73 @@ class AgentMCPServer:
             strip_prefix=registry_mod.MCP_MOUNT_PATH,
         )
         return self._asgi_app
+
+    def _transport_security(self) -> TransportSecuritySettings:
+        """The DNS-rebinding allowlist, built from this app's own public URL.
+
+        **This must be passed explicitly, and getting it wrong is silent.** The SDK's
+        ``streamable_http_app`` takes ``host="127.0.0.1"`` as a *default parameter*
+        and does this with it::
+
+            if transport_security is None and host in ("127.0.0.1", "localhost", "::1"):
+                transport_security = TransportSecuritySettings(
+                    enable_dns_rebinding_protection=True,
+                    allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"], ...)
+
+        So passing neither argument — which is what this did — switches protection on
+        with a localhost-only allowlist. Every app in this ecosystem is served behind
+        Caddy on a real hostname, so every authenticated call arrived with
+        ``Host: bloom.example.dev``, failed ``_validate_host``, and was answered
+        ``421 Invalid Host header``.
+
+        That failure is close to invisible from either end. The bearer gate runs
+        *before* this, so an unauthenticated probe gets a healthy-looking 401 and
+        never reaches the check — which is exactly what a human debugging with curl
+        sends. Only a caller with a **valid token** gets far enough to be rejected,
+        so the symptom is "the peer that is correctly configured is the one that
+        cannot connect", and `agent_runtime` reports it as the peer being
+        unreachable. It cost a day to find, twice, in two repos.
+
+        The guard is worth keeping rather than switching off: it costs a string
+        compare, and an app whose public URL is known can say so precisely. What it
+        cannot do is guess, which is why an app with no ``public_url`` disables it
+        rather than inheriting a localhost allowlist that rejects all real traffic.
+        That is not a hole — DNS rebinding is a *browser* attack, and this server
+        refuses to start without bearer keys (see above), so script running on an
+        attacker's page has nothing to present and is answered 401 by the gate in
+        front of this.
+        """
+        # Loopback stays allowed in every case: health checks from the box, local
+        # development, and `docker exec` probes all address the app directly.
+        allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+        allowed_origins = [
+            "http://127.0.0.1:*",
+            "http://localhost:*",
+            "http://[::1]:*",
+        ]
+
+        hostname = urlparse(self.public_url).hostname if self.public_url else None
+        if not hostname:
+            # No public hostname to allow, so there is no allowlist to build. Say so
+            # once, loudly enough to be found, and let the bearer gate be the defence.
+            logger.warning(
+                "[%s] No public_url is set, so DNS-rebinding protection is off: "
+                "there is no hostname to allow, and a localhost-only allowlist "
+                "would answer 421 to every authenticated call that arrives through "
+                "a proxy. Set public_url (AGENT_MCP_PUBLIC_URL) to turn it back on.",
+                self.app_name,
+            )
+            return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+        # Both forms: Caddy forwards the bare hostname, but a direct call or a
+        # non-standard port arrives with one attached.
+        allowed_hosts += [hostname, f"{hostname}:*"]
+        allowed_origins += [f"https://{hostname}", f"https://{hostname}:*"]
+        return TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=allowed_hosts,
+            allowed_origins=allowed_origins,
+        )
 
     def routes(self, path: str = registry_mod.MCP_MOUNT_PATH) -> list[Any]:
         """Routes serving MCP at ``path``, with **and** without a trailing slash.

@@ -355,3 +355,74 @@ async def test_call_peer_refuses_a_hop_that_would_exceed_the_cap(sink):
 
     with pytest.raises(PeerCallRefused, match="depth"):
         await server.call_peer("school", "lookup", ctx=ctx)
+
+
+# --- DNS-rebinding protection behind a proxy ---------------------------------
+#
+# The SDK's streamable_http_app takes host="127.0.0.1" as a DEFAULT PARAMETER and
+# auto-enables DNS-rebinding protection with a localhost-only allowlist whenever
+# `transport_security` is None. This library passed neither argument, so every app in
+# the ecosystem — all of them served behind Caddy on a real hostname — answered
+# `421 Invalid Host header` to every call that arrived through the proxy.
+#
+# The reason it survived so long is the interaction with the bearer gate, which runs
+# in FRONT of this: an unauthenticated probe (what a human debugging with curl sends)
+# gets a healthy-looking 401 and never reaches the host check. Only a caller with a
+# VALID token got far enough to be rejected. The symptom was "the correctly
+# configured peer is the one that cannot connect".
+
+
+def test_the_public_hostname_is_allowed(sink):
+    """Without this the app 421s every authenticated call that came via a proxy."""
+    server = _server(sink, public_url="https://bloom.example.dev")
+    security = server._transport_security()
+    assert security.enable_dns_rebinding_protection is True
+    assert "bloom.example.dev" in security.allowed_hosts
+    # Both forms: Caddy forwards the bare hostname, a direct call carries a port.
+    assert "bloom.example.dev:*" in security.allowed_hosts
+    assert "https://bloom.example.dev" in security.allowed_origins
+
+
+def test_loopback_stays_allowed_alongside_it(sink):
+    """Health checks from the box and local development address the app directly."""
+    server = _server(sink, public_url="https://bloom.example.dev")
+    hosts = server._transport_security().allowed_hosts
+    assert "127.0.0.1:*" in hosts
+    assert "localhost:*" in hosts
+
+
+def test_a_port_in_the_public_url_does_not_leak_into_the_allowlist(sink):
+    """`urlparse().hostname` strips it; the `:*` pattern is what covers ports."""
+    server = _server(sink, public_url="https://bloom.example.dev:8443")
+    hosts = server._transport_security().allowed_hosts
+    assert "bloom.example.dev" in hosts
+    assert "bloom.example.dev:8443" not in hosts
+
+
+def test_no_public_url_disables_protection_rather_than_rejecting_everything(sink):
+    """A localhost-only allowlist behind a proxy rejects 100% of real traffic.
+
+    Not a hole: DNS rebinding is a browser attack, and this server refuses to start
+    without bearer keys, so a script on an attacker's page is answered 401 by the
+    gate in front of this check.
+    """
+    server = _server(sink, public_url="")
+    security = server._transport_security()
+    assert security.enable_dns_rebinding_protection is False
+
+
+def test_the_settings_actually_reach_the_mounted_app(sink):
+    """The bug was never in the arithmetic — it was in not passing it at all."""
+    captured = {}
+    server = _server(sink, public_url="https://bloom.example.dev")
+    real = server._mcp.streamable_http_app
+
+    def spy(**kwargs):
+        captured.update(kwargs)
+        return real(**kwargs)
+
+    server._mcp.streamable_http_app = spy  # type: ignore[method-assign]
+    server.asgi_app()
+    security = captured.get("transport_security")
+    assert security is not None, "transport_security must be passed explicitly"
+    assert "bloom.example.dev" in security.allowed_hosts
