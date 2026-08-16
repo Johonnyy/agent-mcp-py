@@ -122,9 +122,17 @@ class AgentMCPServer:
             static={
                 **registry_mod.load_static_peers(cfg.peers, cfg.peer_token),
                 **(peers or {}),
-            }
+            },
+            self_name=self.app_name,
         )
         registry_mod.default_registry().set_static(dict(self._registry._static))
+        # An app is never its own peer. The sync store's `GET /servers` returns every
+        # registered server including this one, so without this every app that
+        # discovers anything also discovers itself — and acquires a namespaced HTTP
+        # duplicate of every tool it already runs in-process. Set here rather than
+        # left to each app because it is the same fact for all of them, and the one
+        # place that reliably knows `app_name` before any refresh runs.
+        registry_mod.default_registry().set_self_name(self.app_name)
 
         self._guard = Guard(
             app_name=self.app_name,

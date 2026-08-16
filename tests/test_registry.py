@@ -160,3 +160,81 @@ def test_resolve_performs_no_io_at_all(monkeypatch):
     reg = PeerRegistry(static={"finance": PeerRecord("finance", "https://f")})
     assert reg.resolve("finance").base_url == "https://f"
     assert reg.resolve("missing") is None
+
+
+# --- an app is never its own peer -------------------------------------------
+#
+# `GET /servers` returns every registered server, and the app doing the asking is one
+# of them. Loading that record back gives the app a namespaced HTTP duplicate of
+# every tool it already runs in-process — `amber__add_task` beside `add_task`, out to
+# the network and back to the same process. Nothing errors, which is why it went
+# unnoticed: the only visible symptom was Amber offering to "hand work off to the
+# Amber agent".
+
+
+def test_the_app_does_not_resolve_itself_from_the_discovered_layer():
+    reg = PeerRegistry(
+        discovered={
+            "amber": PeerRecord("amber", "https://amber"),
+            "bloom": PeerRecord("bloom", "https://bloom"),
+        },
+        self_name="amber",
+    )
+    assert reg.resolve("amber") is None
+    assert reg.known() == ["bloom"]
+    # A real peer is untouched — the exclusion is one name, not a mode.
+    assert reg.resolve("bloom").base_url == "https://bloom"
+
+
+def test_the_app_does_not_resolve_itself_from_the_static_map_either():
+    """The reason this filters on read rather than inside `refresh`.
+
+    A hand-written AMBER_MCP_PEERS naming amber, or a connect-peer run pointed at the
+    wrong end, is the same self-loop by a different route — and ingestion-time
+    filtering in `refresh` alone would not catch it.
+    """
+    reg = PeerRegistry(
+        static=load_static_peers("amber=https://amber,bloom=https://bloom"),
+        self_name="amber",
+    )
+    assert reg.resolve("amber") is None
+    assert reg.known() == ["bloom"]
+
+
+def test_the_name_can_be_declared_after_the_records_are_loaded():
+    """No ordering requirement on callers.
+
+    The process-wide registry is built at import, before anything knows what this app
+    is called, and `set_static` runs per turn in Amber while `refresh` runs on a
+    timer. Either can land first.
+    """
+    reg = PeerRegistry(discovered={"amber": PeerRecord("amber", "https://amber")})
+    assert reg.known() == ["amber"]
+    reg.set_self_name("amber")
+    assert reg.known() == []
+    assert reg.resolve("amber") is None
+
+
+def test_no_self_name_keeps_every_record_reachable():
+    """The exclusion must be opt-in by name, never a guess."""
+    reg = PeerRegistry(discovered={"amber": PeerRecord("amber", "https://amber")})
+    assert reg.known() == ["amber"]
+    assert reg.resolve("amber") is not None
+
+
+async def test_refresh_does_not_count_this_app_as_a_peer(monkeypatch):
+    """The count is what callers surface as "how many can I reach"."""
+    payload = {
+        "servers": [
+            {"name": "amber", "base_url": "https://amber"},
+            {"name": "bloom", "base_url": "https://bloom"},
+        ]
+    }
+    monkeypatch.setattr(
+        registry_mod.httpx2,
+        "AsyncClient",
+        lambda **kw: _FakeAsyncClient(payload, {}, **kw),
+    )
+    reg = PeerRegistry(self_name="amber")
+    assert await reg.refresh("https://store") == 1
+    assert reg.known() == ["bloom"]

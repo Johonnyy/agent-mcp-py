@@ -100,22 +100,66 @@ def load_static_peers(spec: str | None, token: str = "") -> dict[str, PeerRecord
 
 
 class PeerRegistry:
-    """The two-layer peer cache: static overrides in front of discovered records."""
+    """The two-layer peer cache: static overrides in front of discovered records.
+
+    **An app is never its own peer.** ``GET /servers`` returns every registered
+    server, and the app doing the asking is one of them — it registered itself. Load
+    that record back and the app acquires a namespaced HTTP duplicate of every tool
+    it already runs in-process: ``amber__add_task`` beside ``add_task``, reachable
+    only by going out to the network and back to the same process. Nothing errors;
+    the depth guard even bounds the loop at ``max_agent_depth``. It is just waste,
+    offered to a model every turn, plus an agent that reports it can "hand work off
+    to the Amber agent" while being Amber.
+
+    Excluded on **read** rather than at ingestion, and that ordering is the point:
+    the process-wide registry is constructed at import, long before anything knows
+    what this app is called, while ``set_static`` and ``refresh`` can both run before
+    the name is set. Filtering in :meth:`resolve` and :meth:`known` means the
+    exclusion holds from the moment the name is known, with no ordering requirement
+    on the callers — and it covers the static map too, which ingestion-time filtering
+    in ``refresh`` alone would miss.
+    """
 
     def __init__(
         self,
         static: Mapping[str, PeerRecord] | None = None,
         discovered: Mapping[str, PeerRecord] | None = None,
+        self_name: str = "",
     ) -> None:
         self._static: dict[str, PeerRecord] = dict(static or {})
         self._discovered: dict[str, PeerRecord] = dict(discovered or {})
+        self._self_name: str = (self_name or "").strip()
+
+    def set_self_name(self, name: str) -> None:
+        """Declare which name in the registry is this app itself.
+
+        Idempotent and safe to re-assert. `AgentMCPServer` calls it at construction,
+        so every app on this library gets the exclusion without asking; an app that
+        never mounts a server (its bearer keys are unset, so it fails closed) can
+        still call it directly, because a stale registration of its own name may
+        outlive the process that wrote it.
+        """
+        self._self_name = (name or "").strip()
+
+    def _is_self(self, name: str) -> bool:
+        return bool(self._self_name) and name == self._self_name
 
     def resolve(self, name: str) -> PeerRecord | None:
-        """Look up a peer. Synchronous, no I/O."""
+        """Look up a peer. Synchronous, no I/O.
+
+        Returns ``None`` for this app's own name, which reads to the caller exactly
+        like an unknown peer — because that is what it is. There is no legitimate
+        reason to reach yourself over MCP, and the in-process path always exists.
+        """
+        if self._is_self(name):
+            return None
         return self._static.get(name) or self._discovered.get(name)
 
     def known(self) -> list[str]:
-        return sorted({*self._static, *self._discovered})
+        names = {*self._static, *self._discovered}
+        if self._self_name:
+            names.discard(self._self_name)
+        return sorted(names)
 
     def set_static(self, records: Mapping[str, PeerRecord]) -> None:
         self._static = dict(records)
@@ -129,9 +173,13 @@ class PeerRegistry:
     ) -> int:
         """Pull the peer list from the sync store into the discovered layer.
 
-        Returns the number of records loaded, and **never raises**: discovery is a
-        convenience, and an app whose registry is unreachable must keep serving with
-        whatever it already knows.
+        Returns the number of **peers** loaded — this app's own registration is not
+        one, so it is not counted. Callers surface that number as "how many can I
+        reach" (Amber's ``peers.status()`` does), and a count that included the app
+        itself would say 2 where :meth:`known` says 1.
+
+        **Never raises**: discovery is a convenience, and an app whose registry is
+        unreachable must keep serving with whatever it already knows.
         """
         if not sync_store_url:
             return 0
@@ -168,8 +216,20 @@ class PeerRegistry:
                 tools=tuple(raw.get("tools") or ()),
             )
         self._discovered = loaded
-        logger.info("Peer refresh: %d server(s) from the sync store", len(loaded))
-        return len(loaded)
+        # The record is kept rather than dropped — `known` and `resolve` filter on
+        # read, so nothing can reach it, and keeping it means a later
+        # `set_self_name` corrects the count without another network round trip.
+        peers = sum(1 for name in loaded if not self._is_self(name))
+        if peers != len(loaded):
+            logger.info(
+                "Peer refresh: %d peer(s) from the sync store (%d records, one of "
+                "them this app's own registration)",
+                peers,
+                len(loaded),
+            )
+        else:
+            logger.info("Peer refresh: %d server(s) from the sync store", peers)
+        return peers
 
 
 #: Process-wide registry, so `resolve` works as a bare function for callers (notably
